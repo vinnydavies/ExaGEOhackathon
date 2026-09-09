@@ -29,7 +29,11 @@ function fetch_global_hourly(
     payload = JSON3.read(String(response.body))
 
     isempty(payload) && return DataFrame()
-    return DataFrame([Dict(Symbol(key) => value for (key, value) in pairs(record)) for record in payload])
+
+    # records don't all share the same fields, so pad rows with `missing` for absent keys
+    all_keys = reduce(union, (Symbol.(keys(record)) for record in payload))
+    rows = [Dict(key => get(record, key, missing) for key in all_keys) for record in payload]
+    return DataFrame(rows)
 end
 
 function packed_number(value, scale::Float64 = 1.0)
@@ -72,11 +76,11 @@ function clean_global_hourly(records::DataFrame)
 
     wind_parts = split.(string.(coalesce.(column_or_missing(cleaned, :WND), "")), ",")
     wind_component(position) = [length(parts) >= position ? parts[position] : missing for parts in wind_parts]
-    cleaned[!, :wind_direction_deg] = numeric_or_missing.(wind_component(1))
-    cleaned[cleaned.wind_direction_deg .== 999, :wind_direction_deg] .= missing
+    wind_direction = numeric_or_missing.(wind_component(1))
+    cleaned[!, :wind_direction_deg] = [ismissing(v) || v == 999 ? missing : v for v in wind_direction]
     cleaned[!, :wind_type] = wind_component(2)
-    cleaned[!, :wind_speed_mps] = numeric_or_missing.(wind_component(4)) ./ 10
-    cleaned[cleaned.wind_speed_mps .>= 999, :wind_speed_mps] .= missing
+    wind_speed = numeric_or_missing.(wind_component(4))
+    cleaned[!, :wind_speed_mps] = [ismissing(v) || v / 10 >= 999 ? missing : v / 10 for v in wind_speed]
 
     dropmissing!(cleaned, :DATE)
     cleaned = unique(cleaned, :DATE)
@@ -111,4 +115,58 @@ function plot_weather(cleaned::DataFrame; station_name::AbstractString = "NOAA s
         gridalpha = 0.25,
     )
     return plot(temperature, wind_speed; layout = (2, 1), size = (900, 520))
+end
+
+"""Turn a 1D series into sliding-window `(X, y)` pairs for sequence models.
+
+`X` has shape `(1, lookback, samples)` and `y` has shape `(horizon, samples)`,
+matching the `(features, timesteps, batch)` convention used by `models.jl`.
+"""
+function make_supervised_sequences(values::AbstractVector; lookback::Int, horizon::Int = 1)
+    series = Float32.(values)
+    n_samples = length(series) - lookback - horizon + 1
+    n_samples <= 0 && error("Not enough observations for the requested lookback/horizon.")
+
+    X = Array{Float32}(undef, 1, lookback, n_samples)
+    y = Array{Float32}(undef, horizon, n_samples)
+    for i in 1:n_samples
+        X[1, :, i] = series[i:(i + lookback - 1)]
+        y[:, i] = series[(i + lookback):(i + lookback + horizon - 1)]
+    end
+    return X, y
+end
+
+"""Plot actual vs. predicted values for a forecast, e.g. an LSTM or Dense model output."""
+function plot_predictions(actual, predicted; dates = nothing, title::AbstractString = "Model predictions vs actual")
+    x = dates === nothing ? (1:length(actual)) : dates
+    p = plot(
+        x,
+        actual;
+        label = "Actual",
+        color = "#377eb8",
+        marker = :circle,
+        markersize = 2,
+        linewidth = 1,
+        title = title,
+        xlabel = dates === nothing ? "Time" : "Observation time (UTC)",
+        ylabel = "Value",
+        gridalpha = 0.25,
+    )
+    plot!(p, x, predicted; label = "Predicted", color = "#e41a1c", marker = :circle, markersize = 2, linewidth = 1)
+    return p
+end
+
+"""Plot training/validation loss curves from a `Dict("loss" => ..., "val_loss" => ...)` history."""
+function plot_training_history(history; title::AbstractString = "Training history")
+    p = plot(
+        history["loss"];
+        label = "Training loss",
+        color = "#377eb8",
+        xlabel = "Epoch",
+        ylabel = "Loss",
+        title = title,
+        gridalpha = 0.25,
+    )
+    haskey(history, "val_loss") && plot!(p, history["val_loss"]; label = "Validation loss", color = "#e41a1c")
+    return p
 end
