@@ -1,4 +1,8 @@
-"""LSTM model for forecasting a univariate time series (e.g. temperature)."""
+"""Forecasting models for a univariate time series (e.g. temperature).
+
+Both models consume the same windowed input shape produced by
+``make_supervised_sequences``: ``(samples, lookback, 1)``.
+"""
 
 from __future__ import annotations
 
@@ -21,8 +25,26 @@ class LSTMForecaster(nn.Module):
         return self.head(hidden[-1])
 
 
-def train_lstm_model(
-    model: LSTMForecaster,
+class DenseForecaster(nn.Module):
+    """Classic feed-forward (MLP) regressor over a flattened lookback window."""
+
+    def __init__(self, *, lookback: int, units: int = 32, horizon: int = 1) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(lookback, units),
+            nn.ReLU(),
+            nn.Linear(units, units),
+            nn.ReLU(),
+            nn.Linear(units, horizon),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+def train_forecaster(
+    model: nn.Module,
     X_train: np.ndarray,
     y_train: np.ndarray,
     *,
@@ -32,7 +54,7 @@ def train_lstm_model(
     learning_rate: float = 1e-3,
     patience: int = 5,
 ) -> dict[str, list[float]]:
-    """Train the LSTM model with early stopping on validation loss.
+    """Train any forecaster (LSTM, Dense, etc.) with early stopping on validation loss.
 
     Returns a history dict with ``loss`` and ``val_loss`` lists, one entry per epoch.
     """
@@ -84,4 +106,8 @@ def train_lstm_model(
     if best_state is not None:
         model.load_state_dict(best_state)
     return history
+
+
+# Backwards-compatible alias: training is model-agnostic (LSTM, Dense, etc.).
+train_lstm_model = train_forecaster
 
