@@ -30,17 +30,30 @@ def plot_predictions(
     actual: np.ndarray | Sequence[float],
     predicted: np.ndarray | Sequence[float],
     *,
+    lower: np.ndarray | Sequence[float] | None = None,
+    upper: np.ndarray | Sequence[float] | None = None,
     dates: Sequence | None = None,
     title: str = "Model predictions vs actual",
 ) -> tuple[plt.Figure, plt.Axes]:
-    """Plot actual vs. predicted values for a forecast, e.g. an LSTM output."""
+    """Plot actual and predicted values, optionally with a prediction interval."""
     actual = np.asarray(actual).reshape(-1)
     predicted = np.asarray(predicted).reshape(-1)
+    if (lower is None) != (upper is None):
+        raise ValueError("lower and upper must be provided together")
     x = dates if dates is not None else np.arange(len(actual))
 
     figure, axis = plt.subplots(figsize=(12, 5), constrained_layout=True)
     axis.plot(x, actual, label="Actual", color="#377eb8", marker=".", linewidth=1)
     axis.plot(x, predicted, label="Predicted", color="#e41a1c", marker=".", linewidth=1)
+    if lower is not None and upper is not None:
+        axis.fill_between(
+            x,
+            np.asarray(lower).reshape(-1),
+            np.asarray(upper).reshape(-1),
+            color="#e41a1c",
+            alpha=0.18,
+            label="95% interval",
+        )
     axis.set_title(title)
     axis.set_xlabel("Time" if dates is None else "Observation time (UTC)")
     axis.set_ylabel("Value")

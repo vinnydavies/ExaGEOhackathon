@@ -9,16 +9,17 @@ from __future__ import annotations
 import numpy as np
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 
 class LSTMForecaster(nn.Module):
-    """Single-layer LSTM regressor predicting ``horizon`` future steps."""
+    """Single-layer LSTM forecaster predicting Gaussian parameters."""
 
     def __init__(self, *, units: int = 32, horizon: int = 1) -> None:
         super().__init__()
         self.lstm = nn.LSTM(input_size=1, hidden_size=units, batch_first=True)
-        self.head = nn.Linear(units, horizon)
+        self.head = nn.Linear(units, 2 * horizon)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         _, (hidden, _) = self.lstm(x)
@@ -26,7 +27,7 @@ class LSTMForecaster(nn.Module):
 
 
 class DenseForecaster(nn.Module):
-    """Classic feed-forward (MLP) regressor over a flattened lookback window."""
+    """Classic feed-forward forecaster predicting Gaussian parameters."""
 
     def __init__(self, *, lookback: int, units: int = 32, horizon: int = 1) -> None:
         super().__init__()
@@ -36,11 +37,37 @@ class DenseForecaster(nn.Module):
             nn.ReLU(),
             nn.Linear(units, units),
             nn.ReLU(),
-            nn.Linear(units, horizon),
+            nn.Linear(units, 2 * horizon),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
+def gaussian_parameters(prediction: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split model output into a mean and a strictly positive standard deviation."""
+    mean, raw_sigma = prediction.chunk(2, dim=-1)
+    sigma = F.softplus(raw_sigma) + 1e-6
+    return mean, sigma
+
+
+def gaussian_nll(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Return the mean Gaussian negative log likelihood for a batch."""
+    mean, sigma = gaussian_parameters(prediction)
+    return (
+        0.5 * ((target - mean) / sigma).square()
+        + sigma.log()
+        + 0.5 * np.log(2 * np.pi)
+    ).mean()
+
+
+def predict_gaussian(model: nn.Module, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Predict means and standard deviations for NumPy input windows."""
+    model.eval()
+    inputs = torch.as_tensor(X, dtype=torch.float32)
+    with torch.no_grad():
+        mean, sigma = gaussian_parameters(model(inputs))
+    return mean.numpy(), sigma.numpy()
 
 
 def train_forecaster(
@@ -66,7 +93,6 @@ def train_forecaster(
     val_loader = DataLoader(val_set, batch_size=batch_size)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    loss_fn = nn.MSELoss()
 
     history: dict[str, list[float]] = {"loss": [], "val_loss": []}
     best_val_loss = float("inf")
@@ -78,7 +104,7 @@ def train_forecaster(
         train_loss = 0.0
         for X_batch, y_batch in train_loader:
             optimizer.zero_grad()
-            loss = loss_fn(model(X_batch), y_batch)
+            loss = gaussian_nll(model(X_batch), y_batch)
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * len(X_batch)
@@ -88,7 +114,7 @@ def train_forecaster(
         val_loss = 0.0
         with torch.no_grad():
             for X_batch, y_batch in val_loader:
-                val_loss += loss_fn(model(X_batch), y_batch).item() * len(X_batch)
+                val_loss += gaussian_nll(model(X_batch), y_batch).item() * len(X_batch)
         val_loss /= max(n_val, 1)
 
         history["loss"].append(train_loss)
